@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using ReplayTool.Application.Interfaces;
 using ReplayTool.Domain.Entities;
 
@@ -9,13 +8,6 @@ public class CreateCaseUseCase
 {
     private readonly IFileStorage _storage;
     private readonly string _storageRoot;
-
-    internal static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true,
-        Converters = { new JsonStringEnumConverter() },
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    };
 
     public CreateCaseUseCase(IFileStorage storage, string storageRoot)
     {
@@ -40,7 +32,7 @@ public class CreateCaseUseCase
         try
         {
             await _storage.CreateDirectoryAsync(caseFolder);
-            var json = JsonSerializer.Serialize(@case, JsonOptions);
+            var json = JsonSerializer.Serialize(@case, JsonConfig.Options);
             await _storage.WriteFileAsync(Path.Combine(caseFolder, "case.json"), json);
         }
         catch
