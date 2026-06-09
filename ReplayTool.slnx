@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="ReplayTool.API/ReplayTool.API.csproj" />
+  <Project Path="ReplayTool.Application/ReplayTool.Application.csproj" />
+  <Project Path="ReplayTool.Domain/ReplayTool.Domain.csproj" />
+  <Project Path="ReplayTool.Infrastructure/ReplayTool.Infrastructure.csproj" />
+</Solution>
