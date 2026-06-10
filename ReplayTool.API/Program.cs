@@ -20,6 +20,7 @@ builder.Services.AddScoped(sp => new ListCasesUseCase(sp.GetRequiredService<IFil
 builder.Services.AddScoped(sp => new UploadTypeFileUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
 builder.Services.AddScoped(sp => new ListTypeFilesUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
 builder.Services.AddScoped(sp => new DeleteTypeFileUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
+builder.Services.AddScoped(sp => new ParseTypeFilesUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
 
 var app = builder.Build();
 
@@ -101,6 +102,12 @@ app.MapDelete("/cases/{id:guid}/files/{type}", async (Guid id, string type, Dele
     {
         return Results.Conflict(new { error = ex.Message });
     }
+});
+
+app.MapGet("/cases/{id:guid}/parse", async (Guid id, ParseTypeFilesUseCase useCase) =>
+{
+    var result = await useCase.ExecuteAsync(id);
+    return result is null ? Results.NotFound() : Results.Ok(result);
 });
 
 app.Run();
