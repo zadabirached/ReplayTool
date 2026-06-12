@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using ReplayTool.Application;
 using ReplayTool.Application.Interfaces;
 using ReplayTool.Application.UseCases;
+using ReplayTool.Infrastructure.Database;
 using ReplayTool.Infrastructure.Storage;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -13,7 +14,12 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 
 var storageRoot = builder.Configuration["STORAGE_ROOT"] ?? "./cases";
+var jobServiceDb = builder.Configuration["JOBSERVICE_DB"]
+    ?? "Host=localhost;Database=jobservice;Username=postgres;Password=postgres";
+var allowRemoteDb = bool.TryParse(builder.Configuration["REPLAY_ALLOW_REMOTE_DB"], out var remoteFlag) && remoteFlag;
+
 builder.Services.AddScoped<IFileStorage, LocalFileStorage>();
+builder.Services.AddScoped<IJobServiceRepository>(_ => new JobServiceRepository(jobServiceDb));
 builder.Services.AddScoped(sp => new CreateCaseUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
 builder.Services.AddScoped(sp => new GetCaseUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
 builder.Services.AddScoped(sp => new ListCasesUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
@@ -21,6 +27,10 @@ builder.Services.AddScoped(sp => new UploadTypeFileUseCase(sp.GetRequiredService
 builder.Services.AddScoped(sp => new ListTypeFilesUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
 builder.Services.AddScoped(sp => new DeleteTypeFileUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
 builder.Services.AddScoped(sp => new ParseTypeFilesUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
+builder.Services.AddScoped(sp => new InsertCustomerOrdersUseCase(
+    sp.GetRequiredService<IFileStorage>(), storageRoot,
+    sp.GetRequiredService<IJobServiceRepository>(),
+    jobServiceDb, allowRemoteDb));
 
 var app = builder.Build();
 
@@ -101,6 +111,19 @@ app.MapDelete("/cases/{id:guid}/files/{type}", async (Guid id, string type, Dele
     catch (InvalidOperationException ex)
     {
         return Results.Conflict(new { error = ex.Message });
+    }
+});
+
+app.MapPost("/cases/{id:guid}/seed", async (Guid id, InsertCustomerOrdersUseCase useCase) =>
+{
+    try
+    {
+        var steps = await useCase.ExecuteAsync(id);
+        return steps is null ? Results.NotFound() : Results.Ok(new { steps });
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
     }
 });
 

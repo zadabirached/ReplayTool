@@ -1,0 +1,121 @@
+using ReplayTool.Application.Interfaces;
+using ReplayTool.Domain.Events;
+
+namespace ReplayTool.Application.UseCases;
+
+public class InsertCustomerOrdersUseCase
+{
+    private readonly IFileStorage _storage;
+    private readonly string _storageRoot;
+    private readonly IJobServiceRepository _repository;
+    private readonly string _connectionString;
+    private readonly bool _allowRemoteDb;
+
+    public InsertCustomerOrdersUseCase(
+        IFileStorage storage,
+        string storageRoot,
+        IJobServiceRepository repository,
+        string connectionString,
+        bool allowRemoteDb)
+    {
+        _storage = storage;
+        _storageRoot = storageRoot;
+        _repository = repository;
+        _connectionString = connectionString;
+        _allowRemoteDb = allowRemoteDb;
+    }
+
+    // Returns null when the case is not found.
+    // Throws InvalidOperationException when the DB target is non-local and no override is set.
+    public async Task<IReadOnlyList<SeedStep>?> ExecuteAsync(Guid caseId)
+    {
+        if (!_allowRemoteDb && !IsLocalConnectionString(_connectionString))
+            throw new InvalidOperationException(
+                "The configured JobService DB target is not local. " +
+                "Set REPLAY_ALLOW_REMOTE_DB=true to override this safety guard.");
+
+        var result = await CaseStore.ReadAsync(_storage, _storageRoot, caseId);
+        if (result is null) return null;
+
+        var (_, folder) = result.Value;
+
+        var filePath = Path.Combine(folder, CaseFileType.Filename(CaseFileType.CustomerOrder));
+        if (!await _storage.FileExistsAsync(filePath))
+            return [];
+
+        var content = await _storage.ReadFileAsync(filePath);
+        var parsed = ParseTypeFilesUseCase.ParseContent<CustomerOrderEvent>(content, normalizeTimestamps: false);
+
+        var steps = new List<SeedStep>();
+
+        // Report parse errors immediately — never silently drop.
+        foreach (var err in parsed.Errors)
+            steps.Add(new SeedStep("Seed", $"[parse error at index {err.Index}]", SeedStepResult.Failed, err.Reason));
+
+        // Deduplicate within the file: first occurrence of each OrderId wins.
+        var seenInFile = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var evt in parsed.Events)
+        {
+            if (!seenInFile.Add(evt.OrderId))
+            {
+                steps.Add(new SeedStep("Seed", evt.OrderId, SeedStepResult.Skipped, "Duplicate OrderId in file"));
+                continue;
+            }
+
+            if (await _repository.OrderExistsAsync(evt.OrderId))
+            {
+                steps.Add(new SeedStep("Seed", evt.OrderId, SeedStepResult.Skipped, "Already in database"));
+                continue;
+            }
+
+            try
+            {
+                int jobFk;
+
+                if (evt.Job is not null)
+                {
+                    // Event carries full job info — upsert and use the resulting integer PK.
+                    jobFk = await _repository.UpsertJobAsync(evt.Job);
+                }
+                else
+                {
+                    // No job info — look up the Job row by business UUID.
+                    var found = await _repository.FindJobPkAsync(evt.JobId);
+                    if (found is null)
+                    {
+                        steps.Add(new SeedStep("Seed", evt.OrderId, SeedStepResult.Failed,
+                            $"Job with business id {evt.JobId} not found in database"));
+                        continue;
+                    }
+                    jobFk = found.Value;
+                }
+
+                await _repository.InsertCustomerOrderAsync(evt, jobFk);
+                steps.Add(new SeedStep("Seed", evt.OrderId, SeedStepResult.Inserted));
+            }
+            catch (Exception ex)
+            {
+                steps.Add(new SeedStep("Seed", evt.OrderId, SeedStepResult.Failed, ex.Message));
+            }
+        }
+
+        return steps;
+    }
+
+    // Parses the Host= segment from a Npgsql-style connection string without taking
+    // a hard dependency on NpgsqlConnectionStringBuilder in Application.
+    private static bool IsLocalConnectionString(string connectionString)
+    {
+        foreach (var segment in connectionString.Split(';'))
+        {
+            var kv = segment.Trim().Split('=', 2);
+            if (kv.Length == 2 && kv[0].Trim().Equals("Host", StringComparison.OrdinalIgnoreCase))
+            {
+                var host = kv[1].Trim().ToLowerInvariant();
+                return host is "" or "localhost" or "127.0.0.1" or "::1";
+            }
+        }
+        return true; // no explicit host → default local
+    }
+}
