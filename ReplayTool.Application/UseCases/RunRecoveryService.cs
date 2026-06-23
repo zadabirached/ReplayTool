@@ -1,0 +1,51 @@
+using ReplayTool.Application.Interfaces;
+using ReplayTool.Domain.Entities;
+
+namespace ReplayTool.Application.UseCases;
+
+// Called once on startup to recover runs that were interrupted by a process restart.
+public class RunRecoveryService
+{
+    private readonly IFileStorage _storage;
+    private readonly string _storageRoot;
+
+    public RunRecoveryService(IFileStorage storage, string storageRoot)
+    {
+        _storage = storage;
+        _storageRoot = storageRoot;
+    }
+
+    public async Task RecoverAsync(RunQueue runQueue, CancellationToken ct)
+    {
+        if (!await _storage.DirectoryExistsAsync(_storageRoot)) return;
+
+        var caseDirs = await _storage.ListDirectoriesAsync(_storageRoot);
+
+        foreach (var caseDir in caseDirs)
+        {
+            if (!Guid.TryParse(Path.GetFileName(caseDir), out var caseId)) continue;
+
+            var runs = await RunStore.ListAsync(_storage, caseDir);
+
+            foreach (var run in runs)
+            {
+                if (run.Status == RunStatus.Running)
+                {
+                    // Restart interrupted this run — mark it failed so it is not stuck.
+                    var failed = run with { Status = RunStatus.Failed, CompletedAt = DateTime.UtcNow };
+                    await RunStore.WriteAsync(_storage, caseDir, failed);
+
+                    // Also revert the case status.
+                    var caseResult = await CaseStore.ReadAsync(_storage, _storageRoot, caseId);
+                    if (caseResult is not null)
+                        await CaseStore.WriteAsync(_storage, caseDir, caseResult.Value.@case with { Status = CaseStatus.Failed });
+                }
+                else if (run.Status == RunStatus.Pending)
+                {
+                    // Re-queue so the worker picks it up after boot.
+                    await runQueue.Writer.WriteAsync((caseId, run.Id), ct);
+                }
+            }
+        }
+    }
+}

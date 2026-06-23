@@ -1,8 +1,12 @@
 using System.Text.Json.Serialization;
+using MassTransit;
 using ReplayTool.Application;
 using ReplayTool.Application.Interfaces;
 using ReplayTool.Application.UseCases;
+using ReplayTool.API.Workers;
+using ReplayTool.Domain.Events;
 using ReplayTool.Infrastructure.Database;
+using ReplayTool.Infrastructure.Messaging;
 using ReplayTool.Infrastructure.Storage;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -31,6 +35,39 @@ builder.Services.AddScoped(sp => new InsertCustomerOrdersUseCase(
     sp.GetRequiredService<IFileStorage>(), storageRoot,
     sp.GetRequiredService<IJobServiceRepository>(),
     jobServiceDb, allowRemoteDb));
+
+// MassTransit + RabbitMQ (publish-only, no consumers in ReplayTool)
+builder.Services.AddMassTransit(x =>
+{
+    x.UsingRabbitMq((ctx, cfg) =>
+    {
+        var rabbitPort = builder.Configuration.GetValue<ushort>("RabbitMQ:Port", 5672);
+        cfg.Host(builder.Configuration["RabbitMQ:Host"] ?? "localhost", rabbitPort, "/", h =>
+        {
+            h.Username(builder.Configuration["RabbitMQ:Username"] ?? "guest");
+            h.Password(builder.Configuration["RabbitMQ:Password"] ?? "guest");
+        });
+        cfg.Message<OrdersRoutingEventV2>(m => m.SetEntityName("routingResponses/v2"));
+        cfg.Publish<OrdersRoutingEventV2>(p => p.ExchangeType = "fanout");
+        cfg.Message<AssignmentSolutionV2Event>(m => m.SetEntityName("anytask/solution/v2"));
+        cfg.Publish<AssignmentSolutionV2Event>(p => p.ExchangeType = "fanout");
+    });
+});
+
+builder.Services.AddSingleton<RunQueue>();
+builder.Services.AddScoped<IMessagePublisher, RabbitMqPublisher>();
+builder.Services.AddScoped(sp => new TriggerRunUseCase(
+    sp.GetRequiredService<IFileStorage>(), storageRoot,
+    sp.GetRequiredService<RunQueue>()));
+builder.Services.AddScoped(sp => new RunExecutionService(
+    sp.GetRequiredService<IFileStorage>(), storageRoot,
+    sp.GetRequiredService<IJobServiceRepository>(),
+    jobServiceDb, allowRemoteDb,
+    sp.GetRequiredService<IMessagePublisher>()));
+builder.Services.AddScoped(sp => new GetRunUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
+builder.Services.AddScoped(sp => new ListRunsUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
+builder.Services.AddScoped(sp => new RunRecoveryService(sp.GetRequiredService<IFileStorage>(), storageRoot));
+builder.Services.AddHostedService<RunWorker>();
 
 var app = builder.Build();
 
@@ -131,6 +168,41 @@ app.MapGet("/cases/{id:guid}/parse", async (Guid id, ParseTypeFilesUseCase useCa
 {
     var result = await useCase.ExecuteAsync(id);
     return result is null ? Results.NotFound() : Results.Ok(result);
+});
+
+app.MapGet("/cases/{id:guid}/timeline", async (Guid id, ParseTypeFilesUseCase parseUseCase) =>
+{
+    var parsed = await parseUseCase.ExecuteAsync(id);
+    if (parsed is null) return Results.NotFound();
+
+    var timeline = new BuildTimelineUseCase().Execute(
+        parsed.RoutingResponses?.Events,
+        parsed.AssignmentSolutions?.Events);
+
+    return Results.Ok(new { entries = timeline });
+});
+
+// Runs
+app.MapPost("/cases/{id:guid}/runs", async (Guid id, TriggerRunRequest? req, TriggerRunUseCase useCase) =>
+{
+    req ??= new TriggerRunRequest();
+    var run = await useCase.ExecuteAsync(id, req);
+    if (run is null) return Results.NotFound();
+    return run.DryRun
+        ? Results.Ok(run)
+        : Results.Accepted($"/cases/{id}/runs/{run.Id}", run);
+});
+
+app.MapGet("/cases/{id:guid}/runs", async (Guid id, ListRunsUseCase useCase) =>
+{
+    var runs = await useCase.ExecuteAsync(id);
+    return runs is null ? Results.NotFound() : Results.Ok(new { runs });
+});
+
+app.MapGet("/cases/{id:guid}/runs/{runId:guid}", async (Guid id, Guid runId, GetRunUseCase useCase) =>
+{
+    var run = await useCase.ExecuteAsync(id, runId);
+    return run is null ? Results.NotFound() : Results.Ok(run);
 });
 
 app.Run();
