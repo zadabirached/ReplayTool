@@ -66,6 +66,9 @@ builder.Services.AddScoped(sp => new RunExecutionService(
     sp.GetRequiredService<IMessagePublisher>()));
 builder.Services.AddScoped(sp => new GetRunUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
 builder.Services.AddScoped(sp => new ListRunsUseCase(sp.GetRequiredService<IFileStorage>(), storageRoot));
+builder.Services.AddScoped(sp => new RetryRunUseCase(
+    sp.GetRequiredService<IFileStorage>(), storageRoot,
+    sp.GetRequiredService<RunQueue>()));
 builder.Services.AddScoped(sp => new RunRecoveryService(sp.GetRequiredService<IFileStorage>(), storageRoot));
 builder.Services.AddHostedService<RunWorker>();
 
@@ -205,6 +208,21 @@ app.MapGet("/cases/{id:guid}/runs/{runId:guid}", async (Guid id, Guid runId, Get
     return run is null ? Results.NotFound() : Results.Ok(run);
 });
 
+app.MapPost("/cases/{id:guid}/runs/{runId:guid}/retry", async (Guid id, Guid runId, RetryRunUseCase useCase) =>
+{
+    try
+    {
+        var run = await useCase.ExecuteAsync(id, runId);
+        return run is null ? Results.NotFound() : Results.Accepted($"/cases/{id}/runs/{run.Id}", run);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Conflict(new { error = ex.Message });
+    }
+});
+
 app.Run();
 
 record CreateCaseRequest(string? Name, string? Description);
+
+public partial class Program { }

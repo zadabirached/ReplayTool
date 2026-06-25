@@ -27,7 +27,8 @@ public class InsertCustomerOrdersUseCase
 
     // Returns null when the case is not found.
     // Throws InvalidOperationException when the DB target is non-local and no override is set.
-    public async Task<IReadOnlyList<SeedStep>?> ExecuteAsync(Guid caseId)
+    // When onlyOrderIds is provided, only those OrderIds are processed (used to retry failed steps).
+    public async Task<IReadOnlyList<SeedStep>?> ExecuteAsync(Guid caseId, IReadOnlySet<string>? onlyOrderIds = null)
     {
         if (!_allowRemoteDb && !IsLocalConnectionString(_connectionString))
             throw new InvalidOperationException(
@@ -57,6 +58,9 @@ public class InsertCustomerOrdersUseCase
 
         foreach (var evt in parsed.Events)
         {
+            if (onlyOrderIds is not null && !onlyOrderIds.Contains(evt.OrderId))
+                continue;
+
             if (!seenInFile.Add(evt.OrderId))
             {
                 steps.Add(new SeedStep("Seed", evt.OrderId, SeedStepResult.Skipped, "Duplicate OrderId in file"));

@@ -137,4 +137,127 @@ public class RunExecutionService
         SeedStepResult.Skipped => RunStepResult.Skipped,
         _ => RunStepResult.Failed,
     };
+
+    // Re-executes only the Failed steps of a previous run, preserving the original
+    // ordering and leaving succeeded steps untouched. Called by RunWorker for a retry.
+    public async Task RetryAsync(Guid caseId, Guid runId, CancellationToken ct)
+    {
+        var caseResult = await CaseStore.ReadAsync(_storage, _storageRoot, caseId);
+        if (caseResult is null) return;
+
+        var (caseEntity, folder) = caseResult.Value;
+        var run = await RunStore.ReadAsync(_storage, folder, runId);
+        if (run is null) return;
+
+        run = run with { Status = RunStatus.Running, StartedAt = DateTime.UtcNow };
+        await RunStore.WriteAsync(_storage, folder, run);
+        await CaseStore.WriteAsync(_storage, folder, caseEntity with { Status = CaseStatus.Running });
+
+        var steps = run.Steps.ToList();
+
+        try
+        {
+            var failedSeedOrderIds = steps
+                .Where(s => s.Phase == "Seed" && s.Result == RunStepResult.Failed)
+                .Select(s => s.EventId)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (failedSeedOrderIds.Count > 0)
+            {
+                var seedUseCase = new InsertCustomerOrdersUseCase(
+                    _storage, _storageRoot, _repository, _connectionString, _allowRemoteDb);
+
+                var retried = await seedUseCase.ExecuteAsync(caseId, failedSeedOrderIds);
+                if (retried is not null)
+                {
+                    foreach (var r in retried)
+                    {
+                        var idx = steps.FindIndex(s =>
+                            s.Phase == "Seed" && s.EventId.Equals(r.OrderId, StringComparison.OrdinalIgnoreCase));
+                        if (idx < 0) continue;
+
+                        steps[idx] = steps[idx] with
+                        {
+                            Result = MapSeedResult(r.Result),
+                            Error = r.Error,
+                            Attempts = steps[idx].Attempts + 1,
+                        };
+                    }
+                }
+            }
+
+            ct.ThrowIfCancellationRequested();
+
+            var failedReplayEventIds = steps
+                .Where(s => s.Phase == "Replay" && s.Result == RunStepResult.Failed)
+                .Select(s => s.EventId)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (failedReplayEventIds.Count > 0)
+            {
+                var parseUseCase = new ParseTypeFilesUseCase(_storage, _storageRoot);
+                var parsed = await parseUseCase.ExecuteAsync(caseId);
+
+                if (parsed is not null)
+                {
+                    var timeline = new BuildTimelineUseCase().Execute(
+                        parsed.RoutingResponses?.Events,
+                        parsed.AssignmentSolutions?.Events);
+
+                    // Retries re-publish in original timeline order, but without re-applying
+                    // the original timing gaps — only re-execution order is preserved here.
+                    foreach (var entry in timeline)
+                    {
+                        var eventId = entry.EventType == ReplayEventType.RoutingResponse
+                            ? $"routing:{entry.RoutingEvent!.CorrelationId}"
+                            : $"assignment:{entry.AssignmentEvent!.AreaId}@{entry.Timestamp:O}";
+
+                        if (!failedReplayEventIds.Contains(eventId)) continue;
+
+                        ct.ThrowIfCancellationRequested();
+
+                        var idx = steps.FindIndex(s =>
+                            s.Phase == "Replay" && s.EventId.Equals(eventId, StringComparison.OrdinalIgnoreCase));
+                        if (idx < 0) continue;
+
+                        try
+                        {
+                            if (entry.EventType == ReplayEventType.RoutingResponse)
+                                await _publisher.PublishRoutingEventAsync(entry.RoutingEvent!, ct);
+                            else
+                                await _publisher.PublishAssignmentEventAsync(entry.AssignmentEvent!, ct);
+
+                            steps[idx] = steps[idx] with
+                            {
+                                Result = RunStepResult.Published,
+                                Error = null,
+                                Attempts = steps[idx].Attempts + 1,
+                            };
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            steps[idx] = steps[idx] with
+                            {
+                                Error = ex.Message,
+                                Attempts = steps[idx].Attempts + 1,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Fall through — final status below is computed from remaining step results.
+        }
+
+        var finalStatus = steps.Any(s => s.Result == RunStepResult.Failed) ? RunStatus.Failed : RunStatus.Completed;
+
+        run = run with { Status = finalStatus, CompletedAt = DateTime.UtcNow, Steps = steps };
+        await RunStore.WriteAsync(_storage, folder, run);
+        await CaseStore.WriteAsync(_storage, folder, caseEntity with
+        {
+            Status = finalStatus == RunStatus.Completed ? CaseStatus.Completed : CaseStatus.Failed
+        });
+    }
 }

@@ -26,15 +26,18 @@ public class RunWorker : BackgroundService
     {
         await RecoverOnStartupAsync(stoppingToken);
 
-        await foreach (var (caseId, runId) in _runQueue.Reader.ReadAllAsync(stoppingToken))
+        await foreach (var (caseId, runId, isRetry) in _runQueue.Reader.ReadAllAsync(stoppingToken))
         {
-            _logger.LogInformation("Starting run {RunId} for case {CaseId}", runId, caseId);
+            _logger.LogInformation("Starting run {RunId} for case {CaseId} (retry={IsRetry})", runId, caseId, isRetry);
 
             try
             {
                 using var scope = _services.CreateScope();
                 var executor = scope.ServiceProvider.GetRequiredService<RunExecutionService>();
-                await executor.ExecuteAsync(caseId, runId, stoppingToken);
+                if (isRetry)
+                    await executor.RetryAsync(caseId, runId, stoppingToken);
+                else
+                    await executor.ExecuteAsync(caseId, runId, stoppingToken);
                 _logger.LogInformation("Completed run {RunId} for case {CaseId}", runId, caseId);
             }
             catch (OperationCanceledException)

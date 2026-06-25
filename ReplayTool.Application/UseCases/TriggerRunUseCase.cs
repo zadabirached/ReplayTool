@@ -48,7 +48,7 @@ public class TriggerRunUseCase
         };
 
         await RunStore.WriteAsync(_storage, folder, run);
-        await _runQueue.Writer.WriteAsync((caseId, run.Id));
+        await _runQueue.Writer.WriteAsync((caseId, run.Id, false));
 
         return run;
     }

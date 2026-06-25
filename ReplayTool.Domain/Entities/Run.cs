@@ -11,7 +11,8 @@ public record RunStep(
     long? OffsetMs = null,
     long? ScheduledOffsetMs = null,
     long? ActualOffsetMs = null,
-    string? Error = null);
+    string? Error = null,
+    int Attempts = 1);
 
 public record Run
 {

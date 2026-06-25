@@ -42,8 +42,11 @@ public class RunRecoveryService
                 }
                 else if (run.Status == RunStatus.Pending)
                 {
-                    // Re-queue so the worker picks it up after boot.
-                    await runQueue.Writer.WriteAsync((caseId, run.Id), ct);
+                    // A fresh trigger always starts with an empty Steps list; a queued retry
+                    // keeps the previous attempt's steps. Use that to resume the right mode
+                    // so a crash before the worker picks it up doesn't re-publish succeeded steps.
+                    var isRetry = run.Steps.Count > 0;
+                    await runQueue.Writer.WriteAsync((caseId, run.Id, isRetry), ct);
                 }
             }
         }
