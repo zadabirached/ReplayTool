@@ -30,7 +30,7 @@ public class InsertCustomerOrdersUseCase
     // When onlyOrderIds is provided, only those OrderIds are processed (used to retry failed steps).
     public async Task<IReadOnlyList<SeedStep>?> ExecuteAsync(Guid caseId, IReadOnlySet<string>? onlyOrderIds = null)
     {
-        if (!_allowRemoteDb && !IsLocalConnectionString(_connectionString))
+        if (!_allowRemoteDb && !LocalTargetGuard.IsLocalConnectionString(_connectionString))
             throw new InvalidOperationException(
                 "The configured JobService DB target is not local. " +
                 "Set REPLAY_ALLOW_REMOTE_DB=true to override this safety guard.");
@@ -105,21 +105,5 @@ public class InsertCustomerOrdersUseCase
         }
 
         return steps;
-    }
-
-    // Parses the Host= segment from a Npgsql-style connection string without taking
-    // a hard dependency on NpgsqlConnectionStringBuilder in Application.
-    private static bool IsLocalConnectionString(string connectionString)
-    {
-        foreach (var segment in connectionString.Split(';'))
-        {
-            var kv = segment.Trim().Split('=', 2);
-            if (kv.Length == 2 && kv[0].Trim().Equals("Host", StringComparison.OrdinalIgnoreCase))
-            {
-                var host = kv[1].Trim().ToLowerInvariant();
-                return host is "" or "localhost" or "127.0.0.1" or "::1";
-            }
-        }
-        return true; // no explicit host → default local
     }
 }

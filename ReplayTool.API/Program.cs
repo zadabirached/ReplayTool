@@ -21,6 +21,15 @@ var storageRoot = builder.Configuration["STORAGE_ROOT"] ?? "./cases";
 var jobServiceDb = builder.Configuration["JOBSERVICE_DB"]
     ?? "Host=localhost;Database=jobservice;Username=postgres;Password=postgres";
 var allowRemoteDb = bool.TryParse(builder.Configuration["REPLAY_ALLOW_REMOTE_DB"], out var remoteFlag) && remoteFlag;
+var rabbitHost = builder.Configuration["RabbitMQ:Host"] ?? "localhost";
+
+// SAFETY: the tool writes directly to a DB and publishes to a broker, so both must
+// default to LOCAL and refuse a non-local target unless explicitly overridden — a
+// captured prod scenario must never be replayed into a real environment.
+if (!allowRemoteDb && !LocalTargetGuard.IsLocalHost(rabbitHost))
+    throw new InvalidOperationException(
+        $"The configured RabbitMQ host '{rabbitHost}' is not local. " +
+        "Set REPLAY_ALLOW_REMOTE_DB=true to override this safety guard.");
 
 builder.Services.AddScoped<IFileStorage, LocalFileStorage>();
 builder.Services.AddScoped<IJobServiceRepository>(_ => new JobServiceRepository(jobServiceDb));
@@ -42,7 +51,7 @@ builder.Services.AddMassTransit(x =>
     x.UsingRabbitMq((ctx, cfg) =>
     {
         var rabbitPort = builder.Configuration.GetValue<ushort>("RabbitMQ:Port", 5672);
-        cfg.Host(builder.Configuration["RabbitMQ:Host"] ?? "localhost", rabbitPort, "/", h =>
+        cfg.Host(rabbitHost, rabbitPort, "/", h =>
         {
             h.Username(builder.Configuration["RabbitMQ:Username"] ?? "guest");
             h.Password(builder.Configuration["RabbitMQ:Password"] ?? "guest");
